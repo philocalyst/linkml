@@ -64,9 +64,50 @@ class TerminusdbGenerator(Generator):
     # ObjectVars
     documents: list = field(default_factory=list)
     current_class_doc: dict = field(default_factory=dict)
+    _inlined_classes: set = field(default_factory=set)
+
+    def _collect_inlined_classes(self) -> set:
+        """Collect class names that are used as inlined ranges.
+
+        These classes are embedded inside parent documents rather than
+        stored as standalone documents, so TerminusDB requires them to
+        be annotated with ``@subdocument`` and ``@key``.
+
+        A class that is used in *any* non-inlined context (explicit
+        ``inlined: false``, or simply omitted) must remain a top-level
+        document — TerminusDB does not allow a class to be both a
+        subdocument and a standalone document.  Classes marked
+        ``tree_root: true`` are always top-level.
+        """
+        inlined = set()
+        non_inlined = set()
+
+        def _check_slot(slot: SlotDefinition) -> None:
+            rng = slot.range
+            if rng and rng in self.schema.classes:
+                if slot.inlined or slot.inlined_as_list:
+                    inlined.add(rng)
+                else:
+                    non_inlined.add(rng)
+
+        for slot in self.schema.slots.values():
+            _check_slot(slot)
+
+        for cls in self.schema.classes.values():
+            if cls.attributes:
+                for attr in cls.attributes.values():
+                    _check_slot(attr)
+
+        # tree_root classes are always top-level documents
+        for cls in self.schema.classes.values():
+            if cls.tree_root:
+                non_inlined.add(cls.name)
+
+        return inlined - non_inlined
 
     def visit_schema(self, inline: bool = False, **kwargs) -> None:
         self.documents = []
+        self._inlined_classes = self._collect_inlined_classes()
         schema_id = str(self.schema.id) if self.schema.id else "terminusdb:///schema"
         schema_base = schema_id.rstrip("/").rstrip("#") + "#"
         data_base = schema_id.rstrip("/").rstrip("#").rsplit("/", 1)[0] + "/data/"
@@ -108,6 +149,9 @@ class TerminusdbGenerator(Generator):
             doc["@inherits"] = [camelcase(cls.is_a)]
         if cls.abstract:
             doc["@abstract"] = []
+        if cls.name in self._inlined_classes:
+            doc["@subdocument"] = []
+            doc["@key"] = {"@type": "ValueHash"}
         if cls.broad_mappings:
             if any(
                 str(self.namespaces.uri_for(m)) == "http://terminusdb.com/schema/system#Document"
